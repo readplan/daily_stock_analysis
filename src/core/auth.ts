@@ -58,15 +58,11 @@ export class AuthService {
   /**
    * 通过 Telegram ID 免登录识别用户
    */
+  /**
+   * 通过 Telegram ID 免登录识别用户
+   */
   async getUserByTelegramId(telegramId: string): Promise<any | null> {
     return await UserModel.findOne({ telegramId: String(telegramId) });
-  }
-
-  /**
-   * 初始化检查 (空方法，保留用于后续可能的自检逻辑)
-   */
-  async initAdmin() {
-    // 逻辑已移除，改由外部脚本或手动维护数据库用户
   }
 }
 

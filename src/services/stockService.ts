@@ -5,90 +5,80 @@ import { DateTime } from 'luxon';
 
 /**
  * ===================================
- * 股票数据与自选股服务 (Node.js/TypeScript 版)
+ * 股票数据与自选股服务 (MongoDB 持久化版)
  * ===================================
  */
 
 export class StockService {
   /**
-   * 获取实时行情 (优先从 Tiingo IEX)
+   * 获取所有自选股代码列表 (从 MongoDB)
    */
-  async getRealtimeQuote(symbol: string) {
+  async getWatchlistSymbols(): Promise<string[]> {
     try {
-      const quote = await tiingoFetcher.getIexQuote(symbol);
-      return quote;
+      const positions = await PositionModel.find({}, { symbol: 1 });
+      return positions.map(p => p.symbol);
     } catch (e) {
-      logger.error(`[Stock] 获取实时行情失败: ${e}`);
-      return null;
-    }
-  }
-
-  /**
-   * 获取历史 K 线数据
-   */
-  async getHistoryData(symbol: string, days: number = 30) {
-    try {
-      const endDate = DateTime.now().toFormat('yyyy-MM-dd');
-      const startDate = DateTime.now().minus({ days }).toFormat('yyyy-MM-dd');
-      return await tiingoFetcher.getHistoricalPrices(symbol, startDate, endDate);
-    } catch (e) {
-      logger.error(`[Stock] 获取历史数据失败: ${e}`);
+      logger.error(`[DB] 获取自选股列表失败: ${e}`);
       return [];
     }
   }
 
   /**
-   * 获取所有自选股及其最新行情
+   * 获取带行情的自选股详情
    */
-  async getWatchlist() {
+  async getWatchlistWithQuotes() {
     try {
-      const positions = await PositionModel.find();
+      const positions = await PositionModel.find().sort({ symbol: 1 });
       const results = [];
 
       for (const pos of positions) {
-        const quote = await this.getRealtimeQuote(pos.symbol);
+        const quote = await tiingoFetcher.getIexQuote(pos.symbol);
         results.push({
           symbol: pos.symbol,
           quantity: pos.quantity,
           avg_cost: pos.avg_cost,
-          current_price: quote?.price || pos.last_price,
+          current_price: quote?.price || pos.last_price || 0,
           change_pct: quote?.change_pct || 0,
           updated_at: pos.updated_at
         });
       }
-
       return results;
     } catch (e) {
-      logger.error(`[Stock] 获取自选股列表失败: ${e}`);
       throw e;
     }
   }
 
   /**
-   * 添加股票到自选股 (无需交易，仅关注)
+   * 添加股票到 MongoDB 自选股
    */
   async addToWatchlist(symbol: string) {
+    const code = symbol.trim().toUpperCase();
     try {
-      const existing = await PositionModel.findOne({ symbol: symbol.toUpperCase() });
-      if (existing) return existing;
-
-      return await PositionModel.create({
-        symbol: symbol.toUpperCase(),
-        quantity: 0, // 0表示仅关注
-        avg_cost: 0
-      });
+      // 使用 upsert，防止重复
+      const result = await PositionModel.findOneAndUpdate(
+        { symbol: code },
+        { 
+          $set: { symbol: code, updated_at: new Date() },
+          $setOnInsert: { quantity: 0, avg_cost: 0 } 
+        },
+        { upsert: true, new: true }
+      );
+      logger.info(`[DB] 已添加自选股: ${code}`);
+      return result;
     } catch (e) {
-      logger.error(`[Stock] 添加自选股失败: ${e}`);
+      logger.error(`[DB] 添加自选股失败: ${e}`);
       throw e;
     }
   }
 
   /**
-   * 从自选股移除
+   * 从 MongoDB 移除自选股
    */
   async removeFromWatchlist(symbol: string) {
+    const code = symbol.trim().toUpperCase();
     try {
-      await PositionModel.deleteOne({ symbol: symbol.toUpperCase() });
+      await PositionModel.deleteOne({ symbol: code });
+      logger.info(`[DB] 已移除自选股: ${code}`);
       return true;
     } catch (e) {
       return false;

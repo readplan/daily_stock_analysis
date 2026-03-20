@@ -4,13 +4,15 @@ import { searchService } from './searchService.js';
 import { stockTrendAnalyzer } from './stockAnalyzer.js';
 import { aiAnalyzer, AnalysisResult } from './aiAnalyzer.js';
 import { notificationService } from './notificationService.js';
+import { stockService } from './stockService.js';
 import { AnalysisModel } from '../schemas/analysis.js';
 import { logger } from '../core/logger.js';
 import { DateTime } from 'luxon';
+import { config } from '../core/config.js';
 
 /**
  * ===================================
- * 分析流水线 (Node.js/TypeScript 版)
+ * 分析流水线 (自动同步 MongoDB)
  * ===================================
  */
 
@@ -22,46 +24,31 @@ export class AnalysisPipeline {
     logger.info(`🚀 开始分析股票: ${code}`);
 
     try {
-      // 1. 获取历史数据
       const endDate = DateTime.now().toFormat('yyyy-MM-dd');
       const startDate = DateTime.now().minus({ days: 120 }).toFormat('yyyy-MM-dd');
       const bars = await tiingoFetcher.getHistoricalPrices(code, startDate, endDate);
 
-      // 2. 获取即时新闻与宏观背景
       let intelContext = "";
-      
-      // 2.1 宏观 (FRED)
       try {
         const fedFunds = await fredFetcher.getSeriesObservations('FEDFUNDS', 1);
         if (fedFunds.length > 0) {
           intelContext += `当前联邦基金利率: ${fedFunds[0].value}% (${fedFunds[0].date})\n`;
         }
-      } catch (e) {}
-
-      // 2.2 联网新闻 (Tavily)
-      try {
         const news = await searchService.getStockContext(code);
         intelContext += `\n${news}`;
-      } catch (e) {
-        logger.warn(`获取新闻失败: ${e}`);
-      }
+      } catch (e) {}
 
-      // 3. 技术面趋势分析
       const trendResult = await stockTrendAnalyzer.analyze(bars, code);
-
-      // 4. AI 深度研判
       const analysis = await aiAnalyzer.analyze({
         code,
         name: code,
         trend: trendResult
       }, intelContext);
 
-      // 5. 持久化到 MongoDB
       if (analysis.success) {
         await this.saveToDatabase(analysis);
       }
 
-      logger.info(`✅ 股票 ${code} 分析完成: ${analysis.operation_advice}`);
       return analysis;
     } catch (error) {
       logger.error(`❌ 股票 ${code} 分析失败: ${error}`);
@@ -70,30 +57,37 @@ export class AnalysisPipeline {
   }
 
   /**
-   * 批量分析自选股并推送报告
+   * 执行每日自动分析任务
    */
-  async processBatchAndNotify(codes: string[]): Promise<void> {
-    logger.info(`📋 开始批量分析股票: ${codes.join(', ')}`);
+  async runDailyAutomatedTask(): Promise<void> {
+    // 1. 优先从 MongoDB 获取自选股
+    let symbols = await stockService.getWatchlistSymbols();
+    
+    // 2. 如果数据库为空，使用环境变量兜底
+    if (symbols.length === 0) {
+      logger.info('ℹ️ 数据库自选股为空，使用配置中的默认列表');
+      symbols = config.STOCK_LIST;
+    }
+
+    if (symbols.length === 0) return;
+
+    logger.info(`📋 开始执行定时分析任务: ${symbols.join(', ')}`);
     const results: AnalysisResult[] = [];
 
-    for (const code of codes) {
+    for (const code of symbols) {
       try {
         const res = await this.processSingleStock(code);
         results.push(res);
       } catch (e) {
-        logger.error(`跳过股票 ${code} 由于错误`);
+        logger.warn(`跳过 ${code}`);
       }
     }
 
     if (results.length > 0) {
-      const report = notificationService.generateDailyReport(results);
-      await notificationService.send(report);
+      await notificationService.pushDailyReport(results);
     }
   }
 
-  /**
-   * 保存到数据库 (Upsert 模式)
-   */
   private async saveToDatabase(result: AnalysisResult) {
     const today = DateTime.now().toFormat('yyyy-MM-dd');
     try {
@@ -102,7 +96,6 @@ export class AnalysisPipeline {
         { ...result, date: today },
         { upsert: true, new: true }
       );
-      logger.debug(`[DB] 成功存储分析记录: ${result.code} (${today})`);
     } catch (e) {
       logger.error(`[DB] 存储失败: ${e}`);
     }

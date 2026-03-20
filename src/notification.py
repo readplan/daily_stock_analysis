@@ -8,11 +8,11 @@ A股自选股智能分析系统 - 通知层
 1. 汇总分析结果生成日报
 2. 支持 Markdown 格式输出
 3. 多渠道推送（自动识别）：
-   - 企业微信 Webhook
-   - 飞书 Webhook
    - Telegram Bot
    - 邮件 SMTP
    - Pushover（手机/桌面推送）
+   - Discord 机器人
+   - PushPlus/Server酱
 """
 import logging
 from datetime import datetime
@@ -29,13 +29,10 @@ from src.notification_sender import (
     CustomWebhookSender,
     DiscordSender,
     EmailSender,
-    FeishuSender,
     PushoverSender,
     PushplusSender,
     Serverchan3Sender,
-    TelegramSender,
-    WechatSender,
-    WECHAT_IMAGE_MAX_BYTES
+    TelegramSender
 )
 
 logger = logging.getLogger(__name__)
@@ -43,8 +40,6 @@ logger = logging.getLogger(__name__)
 
 class NotificationChannel(Enum):
     """通知渠道类型"""
-    WECHAT = "wechat"      # 企业微信
-    FEISHU = "feishu"      # 飞书
     TELEGRAM = "telegram"  # Telegram
     EMAIL = "email"        # 邮件
     PUSHOVER = "pushover"  # Pushover（手机/桌面推送）
@@ -67,8 +62,6 @@ class ChannelDetector:
     def get_channel_name(channel: NotificationChannel) -> str:
         """获取渠道中文名称"""
         names = {
-            NotificationChannel.WECHAT: "企业微信",
-            NotificationChannel.FEISHU: "飞书",
             NotificationChannel.TELEGRAM: "Telegram",
             NotificationChannel.EMAIL: "邮件",
             NotificationChannel.PUSHOVER: "Pushover",
@@ -87,12 +80,10 @@ class NotificationService(
     CustomWebhookSender,
     DiscordSender,
     EmailSender,
-    FeishuSender,
     PushoverSender,
     PushplusSender,
     Serverchan3Sender,
-    TelegramSender,
-    WechatSender
+    TelegramSender
 ):
     """
     通知服务
@@ -103,8 +94,6 @@ class NotificationService(
     3. 支持本地保存日报
     
     支持的渠道：
-    - 企业微信 Webhook
-    - 飞书 Webhook
     - Telegram Bot
     - 邮件 SMTP
     - Pushover（手机/桌面推送）
@@ -139,23 +128,18 @@ class NotificationService(
         CustomWebhookSender.__init__(self, config)
         DiscordSender.__init__(self, config)
         EmailSender.__init__(self, config)
-        FeishuSender.__init__(self, config)
         PushoverSender.__init__(self, config)
         PushplusSender.__init__(self, config)
         Serverchan3Sender.__init__(self, config)
         TelegramSender.__init__(self, config)
-        WechatSender.__init__(self, config)
 
         # 检测所有已配置的渠道
         self._available_channels = self._detect_all_channels()
-        if self._has_context_channel():
-            self._context_channels.append("钉钉会话")
 
-        if not self._available_channels and not self._context_channels:
+        if not self._available_channels:
             logger.warning("未配置有效的通知渠道，将不发送推送通知")
         else:
             channel_names = [ChannelDetector.get_channel_name(ch) for ch in self._available_channels]
-            channel_names.extend(self._context_channels)
             logger.info(f"已配置 {len(channel_names)} 个通知渠道：{', '.join(channel_names)}")
 
     def _normalize_report_type(self, report_type: Any) -> ReportType:
@@ -228,14 +212,6 @@ class NotificationService(
         """
         channels = []
         
-        # 企业微信
-        if self._wechat_url:
-            channels.append(NotificationChannel.WECHAT)
-        
-        # 飞书
-        if self._feishu_url:
-            channels.append(NotificationChannel.FEISHU)
-        
         # Telegram
         if self._is_telegram_configured():
             channels.append(NotificationChannel.TELEGRAM)
@@ -269,8 +245,8 @@ class NotificationService(
         return channels
 
     def is_available(self) -> bool:
-        """检查通知服务是否可用（至少有一个渠道或上下文渠道）"""
-        return len(self._available_channels) > 0 or self._has_context_channel()
+        """检查通知服务是否可用（至少有一个渠道）"""
+        return len(self._available_channels) > 0
     
     def get_available_channels(self) -> List[NotificationChannel]:
         """获取所有已配置的渠道"""
@@ -279,209 +255,8 @@ class NotificationService(
     def get_channel_names(self) -> str:
         """获取所有已配置渠道的名称"""
         names = [ChannelDetector.get_channel_name(ch) for ch in self._available_channels]
-        if self._has_context_channel():
-            names.append("钉钉会话")
         return ', '.join(names)
 
-    # ===== Context channel =====
-    def _has_context_channel(self) -> bool:
-        """判断是否存在基于消息上下文的临时渠道（如钉钉会话、飞书会话）"""
-        return (
-            self._extract_dingtalk_session_webhook() is not None
-            or self._extract_feishu_reply_info() is not None
-        )
-
-    def _extract_dingtalk_session_webhook(self) -> Optional[str]:
-        """从来源消息中提取钉钉会话 Webhook（用于 Stream 模式回复）"""
-        if not isinstance(self._source_message, BotMessage):
-            return None
-        raw_data = getattr(self._source_message, "raw_data", {}) or {}
-        if not isinstance(raw_data, dict):
-            return None
-        session_webhook = (
-            raw_data.get("_session_webhook")
-            or raw_data.get("sessionWebhook")
-            or raw_data.get("session_webhook")
-            or raw_data.get("session_webhook_url")
-        )
-        if not session_webhook and isinstance(raw_data.get("headers"), dict):
-            session_webhook = raw_data["headers"].get("sessionWebhook")
-        return session_webhook
-
-    def _extract_feishu_reply_info(self) -> Optional[Dict[str, str]]:
-        """
-        从来源消息中提取飞书回复信息（用于 Stream 模式回复）
-        
-        Returns:
-            包含 chat_id 的字典，或 None
-        """
-        if not isinstance(self._source_message, BotMessage):
-            return None
-        if getattr(self._source_message, "platform", "") != "feishu":
-            return None
-        chat_id = getattr(self._source_message, "chat_id", "")
-        if not chat_id:
-            return None
-        return {"chat_id": chat_id}
-
-    def send_to_context(self, content: str) -> bool:
-        """
-        向基于消息上下文的渠道发送消息（例如钉钉 Stream 会话）
-        
-        Args:
-            content: Markdown 格式内容
-        """
-        return self._send_via_source_context(content)
-    
-    def _send_via_source_context(self, content: str) -> bool:
-        """
-        使用消息上下文（如钉钉/飞书会话）发送一份报告
-        
-        主要用于从机器人 Stream 模式触发的任务，确保结果能回到触发的会话。
-        """
-        success = False
-        
-        # 尝试钉钉会话
-        session_webhook = self._extract_dingtalk_session_webhook()
-        if session_webhook:
-            try:
-                if self._send_dingtalk_chunked(session_webhook, content, max_bytes=20000):
-                    logger.info("已通过钉钉会话（Stream）推送报告")
-                    success = True
-                else:
-                    logger.error("钉钉会话（Stream）推送失败")
-            except Exception as e:
-                logger.error(f"钉钉会话（Stream）推送异常: {e}")
-
-        # 尝试飞书会话
-        feishu_info = self._extract_feishu_reply_info()
-        if feishu_info:
-            try:
-                if self._send_feishu_stream_reply(feishu_info["chat_id"], content):
-                    logger.info("已通过飞书会话（Stream）推送报告")
-                    success = True
-                else:
-                    logger.error("飞书会话（Stream）推送失败")
-            except Exception as e:
-                logger.error(f"飞书会话（Stream）推送异常: {e}")
-
-        return success
-
-    def _send_feishu_stream_reply(self, chat_id: str, content: str) -> bool:
-        """
-        通过飞书 Stream 模式发送消息到指定会话
-        
-        Args:
-            chat_id: 飞书会话 ID
-            content: 消息内容
-            
-        Returns:
-            是否发送成功
-        """
-        try:
-            from bot.platforms.feishu_stream import FeishuReplyClient, FEISHU_SDK_AVAILABLE
-            if not FEISHU_SDK_AVAILABLE:
-                logger.warning("飞书 SDK 不可用，无法发送 Stream 回复")
-                return False
-            
-            from src.config import get_config
-            config = get_config()
-            
-            app_id = getattr(config, 'feishu_app_id', None)
-            app_secret = getattr(config, 'feishu_app_secret', None)
-            
-            if not app_id or not app_secret:
-                logger.warning("飞书 APP_ID 或 APP_SECRET 未配置")
-                return False
-            
-            # 创建回复客户端
-            reply_client = FeishuReplyClient(app_id, app_secret)
-            
-            # 飞书文本消息有长度限制，需要分批发送
-            max_bytes = getattr(config, 'feishu_max_bytes', 20000)
-            content_bytes = len(content.encode('utf-8'))
-            
-            if content_bytes > max_bytes:
-                return self._send_feishu_stream_chunked(reply_client, chat_id, content, max_bytes)
-            
-            return reply_client.send_to_chat(chat_id, content)
-            
-        except ImportError as e:
-            logger.error(f"导入飞书 Stream 模块失败: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"飞书 Stream 回复异常: {e}")
-            return False
-
-    def _send_feishu_stream_chunked(
-        self, 
-        reply_client, 
-        chat_id: str, 
-        content: str, 
-        max_bytes: int
-    ) -> bool:
-        """
-        分批发送长消息到飞书（Stream 模式）
-        
-        Args:
-            reply_client: FeishuReplyClient 实例
-            chat_id: 飞书会话 ID
-            content: 完整消息内容
-            max_bytes: 单条消息最大字节数
-            
-        Returns:
-            是否全部发送成功
-        """
-        import time
-        
-        def get_bytes(s: str) -> int:
-            return len(s.encode('utf-8'))
-        
-        # 按段落或分隔线分割
-        if "\n---\n" in content:
-            sections = content.split("\n---\n")
-            separator = "\n---\n"
-        elif "\n### " in content:
-            parts = content.split("\n### ")
-            sections = [parts[0]] + [f"### {p}" for p in parts[1:]]
-            separator = "\n"
-        else:
-            # 按行分割
-            sections = content.split("\n")
-            separator = "\n"
-        
-        chunks = []
-        current_chunk = []
-        current_bytes = 0
-        separator_bytes = get_bytes(separator)
-        
-        for section in sections:
-            section_bytes = get_bytes(section) + separator_bytes
-            
-            if current_bytes + section_bytes > max_bytes:
-                if current_chunk:
-                    chunks.append(separator.join(current_chunk))
-                current_chunk = [section]
-                current_bytes = section_bytes
-            else:
-                current_chunk.append(section)
-                current_bytes += section_bytes
-        
-        if current_chunk:
-            chunks.append(separator.join(current_chunk))
-        
-        # 发送每个分块
-        success = True
-        for i, chunk in enumerate(chunks):
-            if i > 0:
-                time.sleep(0.5)  # 避免请求过快
-            
-            if not reply_client.send_to_chat(chat_id, chunk):
-                success = False
-                logger.error(f"飞书 Stream 分块 {i+1}/{len(chunks)} 发送失败")
-        
-        return success
-        
     def generate_daily_report(
         self,
         results: List[AnalysisResult],
@@ -1033,233 +808,6 @@ class NotificationService(
         ])
         
         return "\n".join(report_lines)
-    
-    def generate_wechat_dashboard(self, results: List[AnalysisResult]) -> str:
-        """
-        生成企业微信决策仪表盘精简版（控制在4000字符内）
-        
-        只保留核心结论和狙击点位
-        
-        Args:
-            results: 分析结果列表
-            
-        Returns:
-            精简版决策仪表盘
-        """
-        config = get_config()
-        if getattr(config, 'report_renderer_enabled', False) and results:
-            from src.services.report_renderer import render
-            out = render(
-                platform='wechat',
-                results=results,
-                report_date=datetime.now().strftime('%Y-%m-%d'),
-                summary_only=self._report_summary_only,
-            )
-            if out:
-                return out
-
-        report_date = datetime.now().strftime('%Y-%m-%d')
-        
-        # 按评分排序
-        sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
-        
-        # 统计 - 使用 decision_type 字段准确统计
-        buy_count = sum(1 for r in results if getattr(r, 'decision_type', '') == 'buy')
-        sell_count = sum(1 for r in results if getattr(r, 'decision_type', '') == 'sell')
-        hold_count = sum(1 for r in results if getattr(r, 'decision_type', '') in ('hold', ''))
-        
-        lines = [
-            f"## 🎯 {report_date} 决策仪表盘",
-            "",
-            f"> {len(results)}只股票 | 🟢买入:{buy_count} 🟡观望:{hold_count} 🔴卖出:{sell_count}",
-            "",
-        ]
-        
-        # Issue #262: summary_only 时仅输出摘要列表
-        if self._report_summary_only:
-            lines.append("**📊 分析结果摘要**")
-            lines.append("")
-            for r in sorted_results:
-                _, signal_emoji, _ = self._get_signal_level(r)
-                stock_name = self._escape_md(r.name if r.name and not r.name.startswith('股票') else f'股票{r.code}')
-                lines.append(
-                    f"{signal_emoji} **{stock_name}({r.code})**: {r.operation_advice} | "
-                    f"评分 {r.sentiment_score} | {r.trend_prediction}"
-                )
-        else:
-            for result in sorted_results:
-                signal_text, signal_emoji, _ = self._get_signal_level(result)
-                dashboard = result.dashboard if hasattr(result, 'dashboard') and result.dashboard else {}
-                core = dashboard.get('core_conclusion', {}) if dashboard else {}
-                battle = dashboard.get('battle_plan', {}) if dashboard else {}
-                intel = dashboard.get('intelligence', {}) if dashboard else {}
-                
-                # 股票名称
-                stock_name = result.name if result.name and not result.name.startswith('股票') else f'股票{result.code}'
-                stock_name = self._escape_md(stock_name)
-                
-                # 标题行：信号等级 + 股票名称
-                lines.append(f"### {signal_emoji} **{signal_text}** | {stock_name}({result.code})")
-                lines.append("")
-                
-                # 核心决策（一句话）
-                one_sentence = core.get('one_sentence', result.analysis_summary) if core else result.analysis_summary
-                if one_sentence:
-                    lines.append(f"📌 **{one_sentence[:80]}**")
-                    lines.append("")
-                
-                # 重要信息区（舆情+基本面）
-                info_lines = []
-                
-                # 业绩预期
-                if intel.get('earnings_outlook'):
-                    outlook = str(intel['earnings_outlook'])[:60]
-                    info_lines.append(f"📊 业绩: {outlook}")
-                if intel.get('sentiment_summary'):
-                    sentiment = str(intel['sentiment_summary'])[:50]
-                    info_lines.append(f"💭 舆情: {sentiment}")
-                if info_lines:
-                    lines.extend(info_lines)
-                    lines.append("")
-                
-                # 风险警报（最重要，醒目显示）
-                risks = intel.get('risk_alerts', []) if intel else []
-                if risks:
-                    lines.append("🚨 **风险**:")
-                    for risk in risks[:2]:  # 最多显示2条
-                        risk_str = str(risk)
-                        risk_text = risk_str[:50] + "..." if len(risk_str) > 50 else risk_str
-                        lines.append(f"   • {risk_text}")
-                    lines.append("")
-                
-                # 利好催化
-                catalysts = intel.get('positive_catalysts', []) if intel else []
-                if catalysts:
-                    lines.append("✨ **利好**:")
-                    for cat in catalysts[:2]:  # 最多显示2条
-                        cat_str = str(cat)
-                        cat_text = cat_str[:50] + "..." if len(cat_str) > 50 else cat_str
-                        lines.append(f"   • {cat_text}")
-                    lines.append("")
-                
-                # 狙击点位
-                sniper = battle.get('sniper_points', {}) if battle else {}
-                if sniper:
-                    ideal_buy = str(sniper.get('ideal_buy', ''))
-                    stop_loss = str(sniper.get('stop_loss', ''))
-                    take_profit = str(sniper.get('take_profit', ''))
-                    points = []
-                    if ideal_buy:
-                        points.append(f"🎯买点:{ideal_buy[:15]}")
-                    if stop_loss:
-                        points.append(f"🛑止损:{stop_loss[:15]}")
-                    if take_profit:
-                        points.append(f"🎊目标:{take_profit[:15]}")
-                    if points:
-                        lines.append(" | ".join(points))
-                        lines.append("")
-                
-                # 持仓建议
-                pos_advice = core.get('position_advice', {}) if core else {}
-                if pos_advice:
-                    no_pos = str(pos_advice.get('no_position', ''))
-                    has_pos = str(pos_advice.get('has_position', ''))
-                    if no_pos:
-                        lines.append(f"🆕 空仓者: {no_pos[:50]}")
-                    if has_pos:
-                        lines.append(f"💼 持仓者: {has_pos[:50]}")
-                    lines.append("")
-                
-                # 检查清单简化版
-                checklist = battle.get('action_checklist', []) if battle else []
-                if checklist:
-                    # 只显示不通过的项目
-                    failed_checks = [str(c) for c in checklist if str(c).startswith('❌') or str(c).startswith('⚠️')]
-                    if failed_checks:
-                        lines.append("**检查未通过项**:")
-                        for check in failed_checks[:3]:
-                            lines.append(f"   {check[:40]}")
-                        lines.append("")
-                
-                lines.append("---")
-                lines.append("")
-        
-        # 底部
-        lines.append(f"*生成时间: {datetime.now().strftime('%H:%M')}*")
-        models = self._collect_models_used(results)
-        if models:
-            lines.append(f"*分析模型: {', '.join(models)}*")
-
-        content = "\n".join(lines)
-        
-        return content
-    
-    def generate_wechat_summary(self, results: List[AnalysisResult]) -> str:
-        """
-        生成企业微信精简版日报（控制在4000字符内）
-
-        Args:
-            results: 分析结果列表
-
-        Returns:
-            精简版 Markdown 内容
-        """
-        report_date = datetime.now().strftime('%Y-%m-%d')
-
-        # 按评分排序
-        sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
-
-        # 统计 - 使用 decision_type 字段准确统计
-        buy_count = sum(1 for r in results if getattr(r, 'decision_type', '') == 'buy')
-        sell_count = sum(1 for r in results if getattr(r, 'decision_type', '') == 'sell')
-        hold_count = sum(1 for r in results if getattr(r, 'decision_type', '') in ('hold', ''))
-        avg_score = sum(r.sentiment_score for r in results) / len(results) if results else 0
-
-        lines = [
-            f"## 📅 {report_date} 股票分析报告",
-            "",
-            f"> 共 **{len(results)}** 只 | 🟢买入:{buy_count} 🟡持有:{hold_count} 🔴卖出:{sell_count} | 均分:{avg_score:.0f}",
-            "",
-        ]
-        
-        # 每只股票精简信息（控制长度）
-        for result in sorted_results:
-            emoji = result.get_emoji()
-            
-            # 核心信息行
-            lines.append(f"### {emoji} {result.name}({result.code})")
-            lines.append(f"**{result.operation_advice}** | 评分:{result.sentiment_score} | {result.trend_prediction}")
-            
-            # 操作理由（截断）
-            if hasattr(result, 'buy_reason') and result.buy_reason:
-                reason = result.buy_reason[:80] + "..." if len(result.buy_reason) > 80 else result.buy_reason
-                lines.append(f"💡 {reason}")
-            
-            # 核心看点
-            if hasattr(result, 'key_points') and result.key_points:
-                points = result.key_points[:60] + "..." if len(result.key_points) > 60 else result.key_points
-                lines.append(f"🎯 {points}")
-            
-            # 风险提示（截断）
-            if hasattr(result, 'risk_warning') and result.risk_warning:
-                risk = result.risk_warning[:50] + "..." if len(result.risk_warning) > 50 else result.risk_warning
-                lines.append(f"⚠️ {risk}")
-            
-            lines.append("")
-        
-        # 底部（模型行在 --- 之前，Issue #528）
-        models = self._collect_models_used(results)
-        if models:
-            lines.append(f"*分析模型: {', '.join(models)}*")
-        lines.extend([
-            "---",
-            "*AI生成，仅供参考，不构成投资建议*",
-            f"*详细报告见 reports/report_{report_date.replace('-', '')}.md*"
-        ])
-
-        content = "\n".join(lines)
-
-        return content
 
     def generate_brief_report(
         self,
@@ -1479,15 +1027,8 @@ class NotificationService(
 
         Fallback rules (send as Markdown text instead of image):
         - image_bytes is None: conversion failed / imgkit not installed / content over max_chars
-        - WeChat: image exceeds ~2MB limit
         """
         if channel.value not in self._markdown_to_image_channels or image_bytes is None:
-            return False
-        if channel == NotificationChannel.WECHAT and len(image_bytes) > WECHAT_IMAGE_MAX_BYTES:
-            logger.warning(
-                "企业微信图片超限 (%d bytes)，回退为 Markdown 文本发送",
-                len(image_bytes),
-            )
             return False
         return True
 
@@ -1506,7 +1047,6 @@ class NotificationService(
         - When image_bytes is None (conversion failed / imgkit not installed /
           content over max_chars): all channels configured for image will send
           as Markdown text instead.
-        - When WeChat image exceeds ~2MB: that channel falls back to Markdown text.
 
         Args:
             content: 消息内容（Markdown 格式）
@@ -1551,7 +1091,7 @@ class NotificationService(
                     else "wkhtmltopdf (apt install wkhtmltopdf / brew install wkhtmltopdf)"
                 )
                 logger.warning(
-                    "Markdown 转图片失败，将回退为文本发送。请检查 MARKDOWN_TO_IMAGE_CHANNELS 配置并安装 %s",
+                    "Markdown 转图片失败，将回退为文本发送. 请检查 MARKDOWN_TO_IMAGE_CHANNELS 配置并安装 %s",
                     hint,
                 )
 
@@ -1565,14 +1105,7 @@ class NotificationService(
             channel_name = ChannelDetector.get_channel_name(channel)
             use_image = self._should_use_image_for_channel(channel, image_bytes)
             try:
-                if channel == NotificationChannel.WECHAT:
-                    if use_image:
-                        result = self._send_wechat_image(image_bytes)
-                    else:
-                        result = self.send_to_wechat(content)
-                elif channel == NotificationChannel.FEISHU:
-                    result = self.send_to_feishu(content)
-                elif channel == NotificationChannel.TELEGRAM:
+                if channel == NotificationChannel.TELEGRAM:
                     if use_image:
                         result = self._send_telegram_photo(image_bytes)
                     else:

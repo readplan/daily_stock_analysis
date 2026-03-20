@@ -206,45 +206,20 @@ class StockAnalysisPipeline:
 
             # 如果还是没有名称，使用代码作为名称
             if not stock_name:
-                stock_name = f'股票{code}'
-
-            # Step 2: 获取筹码分布 - 使用统一入口，带熔断保护
-            chip_data = None
-            try:
-                chip_data = self.fetcher_manager.get_chip_distribution(code)
-                if chip_data:
-                    logger.info(f"{stock_name}({code}) 筹码分布: 获利比例={chip_data.profit_ratio:.1%}, "
-                              f"90%集中度={chip_data.concentration_90:.2%}")
-                else:
-                    logger.debug(f"{stock_name}({code}) 筹码分布获取失败或已禁用")
-            except Exception as e:
-                logger.warning(f"{stock_name}({code}) 获取筹码分布失败: {e}")
+                stock_name = code
 
             # If agent mode is explicitly enabled, or specific agent skills are configured, use the Agent analysis pipeline.
-            # NOTE: use config.agent_mode (explicit opt-in) instead of
-            # config.is_agent_available() so that users who only configured an
-            # API Key for the traditional analysis path are not silently
-            # switched to Agent mode (which is slower and more expensive).
             use_agent = getattr(self.config, 'agent_mode', False)
             if not use_agent:
-                # Auto-enable agent mode when specific skills are configured (e.g., scheduled task with strategy)
+                # Auto-enable agent mode when specific skills are configured
                 configured_skills = getattr(self.config, 'agent_skills', [])
                 if configured_skills and configured_skills != ['all']:
                     use_agent = True
                     logger.info(f"{stock_name}({code}) Auto-enabled agent mode due to configured skills: {configured_skills}")
 
-            # Step 2.5: 基本面能力聚合（统一入口，异常降级）
-            # - 失败时返回 partial/failed，不影响既有技术面/新闻链路
-            # - 关闭开关时仍返回 not_supported 结构
-            fundamental_context = None
-            try:
-                fundamental_context = self.fetcher_manager.get_fundamental_context(
-                    code,
-                    budget_seconds=getattr(self.config, 'fundamental_stage_timeout_seconds', 1.5),
-                )
-            except Exception as e:
-                logger.warning(f"{stock_name}({code}) 基本面聚合失败: {e}")
-                fundamental_context = self.fetcher_manager.build_failed_fundamental_context(code, str(e))
+            # 获取基础面信息 (美股版)
+            fundamental_context = self.fetcher_manager.get_fundamental_context(code)
+            chip_data = None
 
             # P0: write-only snapshot, fail-open, no read dependency on this table.
             try:
@@ -1216,165 +1191,12 @@ class StockAnalysisPipeline:
             
             # 推送通知
             if self.notifier.is_available():
-                channels = self.notifier.get_available_channels()
-                context_success = self.notifier.send_to_context(report)
-
-                # Issue #455: Markdown 转图片（与 notification.send 逻辑一致）
-                from src.md2img import markdown_to_image
-
-                channels_needing_image = {
-                    ch for ch in channels
-                    if ch.value in self.notifier._markdown_to_image_channels
-                }
-                non_wechat_channels_needing_image = {
-                    ch for ch in channels_needing_image if ch != NotificationChannel.WECHAT
-                }
-
-                def _get_md2img_hint() -> str:
-                    try:
-                        engine = getattr(get_config(), "md2img_engine", "wkhtmltoimage")
-                    except Exception:
-                        engine = "wkhtmltoimage"
-                    return (
-                        "npm i -g markdown-to-file" if engine == "markdown-to-file"
-                        else "wkhtmltopdf (apt install wkhtmltopdf / brew install wkhtmltopdf)"
-                    )
-
-                image_bytes = None
-                if non_wechat_channels_needing_image:
-                    image_bytes = markdown_to_image(
-                        report, max_chars=self.notifier._markdown_to_image_max_chars
-                    )
-                    if image_bytes:
-                        logger.info(
-                            "Markdown 已转换为图片，将向 %s 发送图片",
-                            [ch.value for ch in non_wechat_channels_needing_image],
-                        )
-                    else:
-                        logger.warning(
-                            "Markdown 转图片失败，将回退为文本发送。请检查 MARKDOWN_TO_IMAGE_CHANNELS 配置并安装 %s",
-                            _get_md2img_hint(),
-                        )
-
-                # 企业微信：只发精简版（平台限制）
-                wechat_success = False
-                if NotificationChannel.WECHAT in channels:
-                    if report_type == ReportType.BRIEF:
-                        dashboard_content = self.notifier.generate_brief_report(results)
-                    else:
-                        dashboard_content = self.notifier.generate_wechat_dashboard(results)
-                    logger.info(f"企业微信仪表盘长度: {len(dashboard_content)} 字符")
-                    logger.debug(f"企业微信推送内容:\n{dashboard_content}")
-                    wechat_image_bytes = None
-                    if NotificationChannel.WECHAT in channels_needing_image:
-                        wechat_image_bytes = markdown_to_image(
-                            dashboard_content,
-                            max_chars=self.notifier._markdown_to_image_max_chars,
-                        )
-                        if wechat_image_bytes is None:
-                            logger.warning(
-                                "企业微信 Markdown 转图片失败，将回退为文本发送。请检查 MARKDOWN_TO_IMAGE_CHANNELS 配置并安装 %s",
-                                _get_md2img_hint(),
-                            )
-                    use_image = self.notifier._should_use_image_for_channel(
-                        NotificationChannel.WECHAT, wechat_image_bytes
-                    )
-                    if use_image:
-                        wechat_success = self.notifier._send_wechat_image(wechat_image_bytes)
-                    else:
-                        wechat_success = self.notifier.send_to_wechat(dashboard_content)
-
-                # 其他渠道：发完整报告（避免自定义 Webhook 被 wechat 截断逻辑污染）
-                non_wechat_success = False
-                stock_email_groups = getattr(self.config, 'stock_email_groups', []) or []
-                for channel in channels:
-                    if channel == NotificationChannel.WECHAT:
-                        continue
-                    if channel == NotificationChannel.FEISHU:
-                        non_wechat_success = self.notifier.send_to_feishu(report) or non_wechat_success
-                    elif channel == NotificationChannel.TELEGRAM:
-                        use_image = self.notifier._should_use_image_for_channel(
-                            channel, image_bytes
-                        )
-                        if use_image:
-                            result = self.notifier._send_telegram_photo(image_bytes)
-                        else:
-                            result = self.notifier.send_to_telegram(report)
-                        non_wechat_success = result or non_wechat_success
-                    elif channel == NotificationChannel.EMAIL:
-                        if stock_email_groups:
-                            code_to_emails: Dict[str, Optional[List[str]]] = {}
-                            for r in results:
-                                if r.code not in code_to_emails:
-                                    emails = []
-                                    for stocks, emails_list in stock_email_groups:
-                                        if r.code in stocks:
-                                            emails.extend(emails_list)
-                                    code_to_emails[r.code] = list(dict.fromkeys(emails)) if emails else None
-                            emails_to_results: Dict[Optional[Tuple], List] = defaultdict(list)
-                            for r in results:
-                                recs = code_to_emails.get(r.code)
-                                key = tuple(recs) if recs else None
-                                emails_to_results[key].append(r)
-                            for key, group_results in emails_to_results.items():
-                                grp_report = self._generate_aggregate_report(group_results, report_type)
-                                grp_image_bytes = None
-                                if channel.value in self.notifier._markdown_to_image_channels:
-                                    grp_image_bytes = markdown_to_image(
-                                        grp_report,
-                                        max_chars=self.notifier._markdown_to_image_max_chars,
-                                    )
-                                use_image = self.notifier._should_use_image_for_channel(
-                                    channel, grp_image_bytes
-                                )
-                                receivers = list(key) if key is not None else None
-                                if use_image:
-                                    result = self.notifier._send_email_with_inline_image(
-                                        grp_image_bytes, receivers=receivers
-                                    )
-                                else:
-                                    result = self.notifier.send_to_email(
-                                        grp_report, receivers=receivers
-                                    )
-                                non_wechat_success = result or non_wechat_success
-                        else:
-                            use_image = self.notifier._should_use_image_for_channel(
-                                channel, image_bytes
-                            )
-                            if use_image:
-                                result = self.notifier._send_email_with_inline_image(image_bytes)
-                            else:
-                                result = self.notifier.send_to_email(report)
-                            non_wechat_success = result or non_wechat_success
-                    elif channel == NotificationChannel.CUSTOM:
-                        use_image = self.notifier._should_use_image_for_channel(
-                            channel, image_bytes
-                        )
-                        if use_image:
-                            result = self.notifier._send_custom_webhook_image(
-                                image_bytes, fallback_content=report
-                            )
-                        else:
-                            result = self.notifier.send_to_custom(report)
-                        non_wechat_success = result or non_wechat_success
-                    elif channel == NotificationChannel.PUSHPLUS:
-                        non_wechat_success = self.notifier.send_to_pushplus(report) or non_wechat_success
-                    elif channel == NotificationChannel.SERVERCHAN3:
-                        non_wechat_success = self.notifier.send_to_serverchan3(report) or non_wechat_success
-                    elif channel == NotificationChannel.DISCORD:
-                        non_wechat_success = self.notifier.send_to_discord(report) or non_wechat_success
-                    elif channel == NotificationChannel.PUSHOVER:
-                        non_wechat_success = self.notifier.send_to_pushover(report) or non_wechat_success
-                    elif channel == NotificationChannel.ASTRBOT:
-                        non_wechat_success = self.notifier.send_to_astrbot(report) or non_wechat_success
-                    else:
-                        logger.warning(f"未知通知渠道: {channel}")
-
-                success = wechat_success or non_wechat_success or context_success
+                # 直接调用统一发送接口，notifier.send 会自动处理各渠道的 Markdown/图片逻辑
+                success = self.notifier.send(report)
                 if success:
-                    logger.info("决策仪表盘推送成功")
+                    logger.info("已推送汇总决策仪表盘")
                 else:
-                    logger.warning("决策仪表盘推送失败")
+                    logger.warning("汇总决策仪表盘推送失败（或部分失败）")
             else:
                 logger.info("通知渠道未配置，跳过推送")
                 

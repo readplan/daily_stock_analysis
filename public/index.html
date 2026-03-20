@@ -13,57 +13,62 @@
         .btn-primary { background-color: var(--primary-blue); border: none; }
         .stock-tag { background: #ddf4ff; color: #0969da; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; margin-right: 5px; }
         #analysis-result { white-space: pre-wrap; font-family: monospace; font-size: 13px; background: #f8f9fa; padding: 15px; border-radius: 4px; }
-        .sidebar { background: white; border-right: 1px solid #d0d7de; height: calc(100vh - 56px); }
+        .sidebar { background: white; border-right: 1px solid #d0d7de; height: calc(100vh - 56px); overflow-y: auto; }
+        .login-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 2000; display: none; align-items: center; justify-content: center; }
+        .login-box { background: white; padding: 30px; border-radius: 8px; width: 350px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
     </style>
 </head>
 <body>
+    <!-- 登录弹窗 -->
+    <div id="login-overlay" class="login-overlay">
+        <div class="login-box">
+            <h5 class="fw-bold mb-4 text-center">🔐 管理员登录</h5>
+            <div class="mb-3">
+                <label class="form-label small">用户名</label>
+                <input type="text" id="login-username" class="form-control" placeholder="Admin">
+            </div>
+            <div class="mb-4">
+                <label class="form-label small">密码</label>
+                <input type="password" id="login-password" class="form-control" placeholder="请输入密码">
+            </div>
+            <button class="btn btn-primary w-100 mb-2" onclick="performLogin()">登录</button>
+            <p id="login-error" class="text-danger small text-center" style="display:none"></p>
+        </div>
+    </div>
+
     <nav class="navbar navbar-expand-lg">
         <div class="container-fluid">
             <span class="navbar-brand fw-bold text-primary">📊 DSA Smart Console</span>
-            <div id="connection-status" class="badge bg-success">Connected</div>
+            <div>
+                <span id="user-display" class="me-3 small text-muted"></span>
+                <span id="connection-status" class="badge bg-success">Connected</span>
+                <button class="btn btn-link btn-sm text-muted text-decoration-none" onclick="logout()">退出</button>
+            </div>
         </div>
     </nav>
 
     <div class="container-fluid">
         <div class="row">
-            <!-- 侧边栏：自选股管理 -->
+            <!-- 侧边栏 -->
             <div class="col-md-3 sidebar p-3">
                 <h6 class="fw-bold mb-3">我的自选股</h6>
                 <div class="input-group mb-3">
-                    <input type="text" id="new-stock" class="form-control form-control-sm" placeholder="股票代码 (如 AAPL)">
+                    <input type="text" id="new-stock" class="form-control form-control-sm" placeholder="代码">
                     <button class="btn btn-sm btn-outline-primary" onclick="addStock()">添加</button>
                 </div>
-                <div id="stock-list" class="list-group list-group-flush">
-                    <!-- 动态加载 -->
-                </div>
+                <div id="stock-list" class="list-group list-group-flush small"></div>
             </div>
 
-            <!-- 主内容区：分析与历史 -->
+            <!-- 主内容 -->
             <div class="col-md-9 p-4">
-                <div class="row">
-                    <div class="col-md-12">
-                        <div class="card p-3">
-                            <div class="d-flex justify-content-between align-items-center mb-3">
-                                <h5 class="fw-bold m-0">即时 AI 分析</h5>
-                                <button id="run-batch" class="btn btn-sm btn-primary" onclick="runBatch()">运行全量自选股分析</button>
-                            </div>
-                            <div class="input-group">
-                                <input type="text" id="target-stock" class="form-control" placeholder="输入代码开始深度研判...">
-                                <button class="btn btn-primary" onclick="analyzeStock()">开始分析</button>
-                            </div>
-                        </div>
+                <div class="card p-3">
+                    <div class="input-group">
+                        <input type="text" id="target-stock" class="form-control" placeholder="输入代码开始深度研判...">
+                        <button class="btn btn-primary" onclick="analyzeStock()">开始分析</button>
                     </div>
                 </div>
-
-                <div class="row mt-3">
-                    <div class="col-md-12">
-                        <div class="card p-3">
-                            <h6 class="fw-bold mb-3">分析看板 (最新)</h6>
-                            <div id="analysis-output">
-                                <p class="text-muted text-center">暂无运行数据</p>
-                            </div>
-                        </div>
-                    </div>
+                <div id="analysis-output" class="mt-3">
+                    <p class="text-muted text-center py-5">请在左侧添加股票或在上方搜索</p>
                 </div>
             </div>
         </div>
@@ -71,60 +76,88 @@
 
     <script>
         const API_BASE = '/api';
+        let sessionToken = localStorage.getItem('dsa_session_token');
+
+        async function apiFetch(url, options = {}) {
+            const headers = { 'Content-Type': 'application/json', ...options.headers };
+            if (sessionToken) headers['X-Session-Token'] = sessionToken;
+            const res = await fetch(url, { ...options, headers });
+            if (res.status === 401) { showLogin(); throw new Error('Unauthorized'); }
+            return res;
+        }
+
+        function showLogin() { document.getElementById('login-overlay').style.display = 'flex'; }
+        function hideLogin() { document.getElementById('login-overlay').style.display = 'none'; }
+
+        async function performLogin() {
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            const errorEl = document.getElementById('login-error');
+
+            try {
+                // 🚀 更新为新的登录路径
+                const res = await fetch('/manage/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    sessionToken = data.token;
+                    localStorage.setItem('dsa_session_token', sessionToken);
+                    hideLogin(); fetchStocks();
+                } else {
+                    errorEl.textContent = data.message; errorEl.style.display = 'block';
+                }
+            } catch (e) { errorEl.textContent = '登录请求失败'; errorEl.style.display = 'block'; }
+        }
+
+        function logout() { localStorage.removeItem('dsa_session_token'); location.reload(); }
 
         async function fetchStocks() {
-            const res = await fetch(`${API_BASE}/stocks`);
-            const stocks = await res.json();
-            const container = document.getElementById('stock-list');
-            container.innerHTML = stocks.map(s => `
-                <div class="list-group-item d-flex justify-content-between align-items-center">
-                    <div>
+            try {
+                const res = await apiFetch(`${API_BASE}/stocks`);
+                const stocks = await res.json();
+                document.getElementById('stock-list').innerHTML = stocks.map(s => `
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
                         <span class="fw-bold">${s.symbol}</span>
-                        <br><small class="text-muted">$${s.current_price || 'N/A'}</small>
+                        <button class="btn btn-link btn-sm text-danger" onclick="removeStock('${s.symbol}')">移除</button>
                     </div>
-                    <button class="btn btn-link btn-sm text-danger" onclick="removeStock('${s.symbol}')">移除</button>
-                </div>
-            `).join('');
+                `).join('');
+            } catch (e) {}
         }
 
         async function addStock() {
             const symbol = document.getElementById('new-stock').value;
             if (!symbol) return;
-            await fetch(`${API_BASE}/stocks`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ symbol })
-            });
-            document.getElementById('new-stock').value = '';
-            fetchStocks();
+            await apiFetch(`${API_BASE}/stocks`, { method: 'POST', body: JSON.stringify({ symbol }) });
+            document.getElementById('new-stock').value = ''; fetchStocks();
+        }
+
+        async function removeStock(symbol) {
+            if (confirm(`确认移除 ${symbol}？`)) {
+                await apiFetch(`${API_BASE}/stocks/${symbol}`, { method: 'DELETE' });
+                fetchStocks();
+            }
         }
 
         async function analyzeStock() {
             const ticker = document.getElementById('target-stock').value.toUpperCase();
             if (!ticker) return;
-            
             const output = document.getElementById('analysis-output');
-            output.innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary"></div><p class="mt-2">正在驱动 Gemini 3.0 进行多维研判...</p></div>`;
-
+            output.innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary"></div><p>分析中...</p></div>`;
             try {
-                const res = await fetch(`${API_BASE}/analyze/${ticker}`);
+                const res = await apiFetch(`${API_BASE}/analyze/${ticker}`);
                 const data = await res.json();
-                
                 output.innerHTML = `
-                    <div class="alert alert-info">
-                        <strong>结论: ${data.operation_advice}</strong> (评分: ${data.sentiment_score})
-                    </div>
-                    <h6>核心摘要</h6>
-                    <p>${data.analysis_summary}</p>
-                    <hr>
-                    <div id="analysis-result">${JSON.stringify(data.dashboard, null, 2)}</div>
+                    <div class="alert alert-info">结论: ${data.operation_advice} (评分: ${data.sentiment_score})</div>
+                    <p class="small">${data.analysis_summary}</p>
+                    <pre id="analysis-result">${JSON.stringify(data.dashboard, null, 2)}</pre>
                 `;
-            } catch (e) {
-                output.innerHTML = `<div class="alert alert-danger">分析请求失败，请检查后端服务。</div>`;
-            }
+            } catch (e) { output.innerHTML = `<div class="alert alert-danger">分析失败</div>`; }
         }
 
-        fetchStocks();
+        if (!sessionToken) showLogin(); else fetchStocks();
     </script>
 </body>
 </html>

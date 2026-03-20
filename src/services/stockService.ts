@@ -5,13 +5,27 @@ import { DateTime } from 'luxon';
 
 /**
  * ===================================
- * 股票数据与自选股服务 (MongoDB 持久化版)
+ * 股票数据与自选股服务 (完整功能版)
  * ===================================
  */
 
 export class StockService {
   /**
-   * 获取所有自选股代码列表 (从 MongoDB)
+   * 获取历史 K 线数据 (主要用于分析)
+   */
+  async getHistoryData(symbol: string, days: number = 60) {
+    try {
+      const endDate = DateTime.now().toFormat('yyyy-MM-dd');
+      const startDate = DateTime.now().minus({ days }).toFormat('yyyy-MM-dd');
+      return await tiingoFetcher.getHistoricalPrices(symbol, startDate, endDate);
+    } catch (e) {
+      logger.error(`[Stock] 获取历史数据失败: ${e}`);
+      return [];
+    }
+  }
+
+  /**
+   * 获取所有自选股代码列表
    */
   async getWatchlistSymbols(): Promise<string[]> {
     try {
@@ -49,12 +63,11 @@ export class StockService {
   }
 
   /**
-   * 添加股票到 MongoDB 自选股
+   * 添加到自选股
    */
   async addToWatchlist(symbol: string) {
     const code = symbol.trim().toUpperCase();
     try {
-      // 使用 upsert，防止重复
       const result = await PositionModel.findOneAndUpdate(
         { symbol: code },
         { 
@@ -63,22 +76,19 @@ export class StockService {
         },
         { upsert: true, new: true }
       );
-      logger.info(`[DB] 已添加自选股: ${code}`);
       return result;
     } catch (e) {
-      logger.error(`[DB] 添加自选股失败: ${e}`);
       throw e;
     }
   }
 
   /**
-   * 从 MongoDB 移除自选股
+   * 移除自选股
    */
   async removeFromWatchlist(symbol: string) {
     const code = symbol.trim().toUpperCase();
     try {
       await PositionModel.deleteOne({ symbol: code });
-      logger.info(`[DB] 已移除自选股: ${code}`);
       return true;
     } catch (e) {
       return false;

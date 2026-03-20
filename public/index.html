@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DSA - 美股智能分析控制台</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        :root { --primary-blue: #0366d6; }
+        body { background-color: #f6f8fa; font-family: -apple-system, system-ui, sans-serif; }
+        .navbar { background-color: white; border-bottom: 1px solid #d0d7de; }
+        .card { border: 1px solid #d0d7de; border-radius: 6px; box-shadow: none; margin-bottom: 20px; }
+        .btn-primary { background-color: var(--primary-blue); border: none; }
+        .stock-tag { background: #ddf4ff; color: #0969da; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; margin-right: 5px; }
+        #analysis-result { white-space: pre-wrap; font-family: monospace; font-size: 13px; background: #f8f9fa; padding: 15px; border-radius: 4px; }
+        .sidebar { background: white; border-right: 1px solid #d0d7de; height: calc(100vh - 56px); }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg">
+        <div class="container-fluid">
+            <span class="navbar-brand fw-bold text-primary">📊 DSA Smart Console</span>
+            <div id="connection-status" class="badge bg-success">Connected</div>
+        </div>
+    </nav>
+
+    <div class="container-fluid">
+        <div class="row">
+            <!-- 侧边栏：自选股管理 -->
+            <div class="col-md-3 sidebar p-3">
+                <h6 class="fw-bold mb-3">我的自选股</h6>
+                <div class="input-group mb-3">
+                    <input type="text" id="new-stock" class="form-control form-control-sm" placeholder="股票代码 (如 AAPL)">
+                    <button class="btn btn-sm btn-outline-primary" onclick="addStock()">添加</button>
+                </div>
+                <div id="stock-list" class="list-group list-group-flush">
+                    <!-- 动态加载 -->
+                </div>
+            </div>
+
+            <!-- 主内容区：分析与历史 -->
+            <div class="col-md-9 p-4">
+                <div class="row">
+                    <div class="col-md-12">
+                        <div class="card p-3">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h5 class="fw-bold m-0">即时 AI 分析</h5>
+                                <button id="run-batch" class="btn btn-sm btn-primary" onclick="runBatch()">运行全量自选股分析</button>
+                            </div>
+                            <div class="input-group">
+                                <input type="text" id="target-stock" class="form-control" placeholder="输入代码开始深度研判...">
+                                <button class="btn btn-primary" onclick="analyzeStock()">开始分析</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row mt-3">
+                    <div class="col-md-12">
+                        <div class="card p-3">
+                            <h6 class="fw-bold mb-3">分析看板 (最新)</h6>
+                            <div id="analysis-output">
+                                <p class="text-muted text-center">暂无运行数据</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api';
+
+        async function fetchStocks() {
+            const res = await fetch(`${API_BASE}/stocks`);
+            const stocks = await res.json();
+            const container = document.getElementById('stock-list');
+            container.innerHTML = stocks.map(s => `
+                <div class="list-group-item d-flex justify-content-between align-items-center">
+                    <div>
+                        <span class="fw-bold">${s.symbol}</span>
+                        <br><small class="text-muted">$${s.current_price || 'N/A'}</small>
+                    </div>
+                    <button class="btn btn-link btn-sm text-danger" onclick="removeStock('${s.symbol}')">移除</button>
+                </div>
+            `).join('');
+        }
+
+        async function addStock() {
+            const symbol = document.getElementById('new-stock').value;
+            if (!symbol) return;
+            await fetch(`${API_BASE}/stocks`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ symbol })
+            });
+            document.getElementById('new-stock').value = '';
+            fetchStocks();
+        }
+
+        async function analyzeStock() {
+            const ticker = document.getElementById('target-stock').value.toUpperCase();
+            if (!ticker) return;
+            
+            const output = document.getElementById('analysis-output');
+            output.innerHTML = `<div class="text-center py-5"><div class="spinner-border text-primary"></div><p class="mt-2">正在驱动 Gemini 3.0 进行多维研判...</p></div>`;
+
+            try {
+                const res = await fetch(`${API_BASE}/analyze/${ticker}`);
+                const data = await res.json();
+                
+                output.innerHTML = `
+                    <div class="alert alert-info">
+                        <strong>结论: ${data.operation_advice}</strong> (评分: ${data.sentiment_score})
+                    </div>
+                    <h6>核心摘要</h6>
+                    <p>${data.analysis_summary}</p>
+                    <hr>
+                    <div id="analysis-result">${JSON.stringify(data.dashboard, null, 2)}</div>
+                `;
+            } catch (e) {
+                output.innerHTML = `<div class="alert alert-danger">分析请求失败，请检查后端服务。</div>`;
+            }
+        }
+
+        fetchStocks();
+    </script>
+</body>
+</html>
